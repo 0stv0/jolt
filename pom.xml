@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>stevku.jolt</groupId>
+    <groupId>io.github.0stv0</groupId>
     <artifactId>jolt</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
@@ -28,8 +28,8 @@
     </developers>
 
     <scm>
-        <connection>scm:git:github.com/stevku/jolt.git</connection>
-        <url>https://github.com/stevku/jolt</url>
+        <connection>scm:git:github.com/0stv0/jolt.git</connection>
+        <url>https://github.com/0stv0/jolt</url>
     </scm>
 
     <properties>
@@ -63,6 +63,16 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.4.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <tokenAuth>true</tokenAuth>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
