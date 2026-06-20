@@ -1,5 +1,6 @@
 package stevku.jolt.domain;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -47,6 +48,19 @@ public class JSON {
         else if (v instanceof JSON json)
         {
             return json.stringify();
+        }
+        else if (v instanceof List<?> list)
+        {
+            StringBuilder arr = new StringBuilder("[");
+            for (Object item : list)
+            {
+                arr.append(this.serializeValue(item));
+                arr.append(",");
+            }
+            if (arr.length() > 1)
+                arr.deleteCharAt(arr.length() - 1);
+            arr.append("]");
+            return arr.toString();
         }
         return "\"" + v + "\"";
     }

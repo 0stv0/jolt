@@ -4,6 +4,9 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.cdimascio.dotenv.Dotenv;
 import org.reflections.Reflections;
+import org.reflections.scanners.FieldAnnotationsScanner;
+import org.reflections.scanners.SubTypesScanner;
+import org.reflections.util.ClasspathHelper;
 import org.reflections.util.ConfigurationBuilder;
 import org.reflections.util.FilterBuilder;
 import stevku.jolt.domain.JSON;
@@ -13,8 +16,10 @@ import stevku.jolt.utils.AsyncUtil;
 import stevku.jolt.utils.Logger;
 import stevku.jolt.utils.Router;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.Map;
@@ -57,6 +62,7 @@ public class Server {
     }
     public Server listen() throws Exception
     {
+        this.env();
         this.scan();
         if (this.onStop != null)
             Runtime.getRuntime().addShutdownHook(new Thread(this.onStop));
@@ -174,23 +180,6 @@ public class Server {
         for (Class<?> controller : controllers)
         {
             Object instance = controller.getDeclaredConstructor().newInstance();
-            for (Field field : controller.getDeclaredFields())
-            {
-                if (!field.isAnnotationPresent(Env.class))
-                    continue;
-                String envKey = field.getAnnotation(Env.class).value();
-                String envVal = dotenv.get(envKey);
-                if (envVal == null)
-                    continue;
-                field.setAccessible(true);
-                if (field.getType() == int.class)
-                    field.set(instance, Integer.parseInt(envVal));
-                else if (field.getType() == boolean.class)
-                    field.set(instance, Boolean.parseBoolean(envVal));
-                else
-                    field.set(instance, envVal);
-            }
-
             Controller meta = controller.getAnnotation(Controller.class);
             String basePath = meta.path();
             String cors     = meta.cors();
@@ -214,6 +203,46 @@ public class Server {
             try { this.handle(ex); }
             catch (Exception _) {}
         });
+    }
+    private void env() throws Exception
+    {
+        String cp      = System.getProperty("java.class.path");
+        String[] parts = cp.split(";");
+
+        ConfigurationBuilder config = new ConfigurationBuilder()
+            .filterInputsBy(new FilterBuilder().includePattern(".*"))
+            .addClassLoaders(Thread.currentThread().getContextClassLoader())
+            .addClassLoaders(ClassLoader.getSystemClassLoader())
+            .setScanners(new SubTypesScanner(false), new FieldAnnotationsScanner());
+        for (String path : parts)
+            config.addUrls(new File(path).toURI().toURL());
+
+        Reflections reflections  = new Reflections(config);
+        Set<Class<?>> allClasses = reflections.getSubTypesOf(Object.class);
+        for (Class<?> clazz : allClasses)
+            try
+            {
+                for (Field field : clazz.getDeclaredFields())
+                {
+                    if (!field.isAnnotationPresent(Env.class) || !Modifier.isStatic(field.getModifiers()))
+                        continue;
+                    String envKey = field.getAnnotation(Env.class).value();
+                    String envVal = dotenv.get(envKey);
+                    if (envVal == null)
+                        continue;
+
+                    field.setAccessible(true);
+                    Object val;
+                    if (field.getType() == int.class)
+                        val = Integer.parseInt(envVal);
+                    else if (field.getType() == boolean.class)
+                        val = Boolean.parseBoolean(envVal);
+                    else
+                        val = envVal;
+                    field.set(null, val);
+                }
+            }
+            catch (Throwable _) {}
     }
     private void handle(HttpExchange ex) throws Exception
     {
@@ -303,7 +332,7 @@ public class Server {
                             result = errorMethod.invoke(this.errorInstances.get(cause.getClass()), cause);
                         else
                             result = errorMethod.invoke(this.errorInstances.get(cause.getClass()));
-                        
+
                         String str    = result.toString();
                         TextType type = str.trim().startsWith("<") ? TextType.HTML : TextType.Basic;
                         this.sendResponse(ex, result, type, 500);
