@@ -7,6 +7,8 @@ import org.reflections.Reflections;
 import org.reflections.util.ConfigurationBuilder;
 import org.reflections.util.FilterBuilder;
 import stevku.jolt.domain.JSON;
+import stevku.jolt.internal.annotations.*;
+import stevku.jolt.internal.enums.TextType;
 import stevku.jolt.utils.AsyncUtil;
 import stevku.jolt.utils.Logger;
 import stevku.jolt.utils.Router;
@@ -17,6 +19,9 @@ import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @SuppressWarnings("all")
 public class Server {
@@ -26,10 +31,15 @@ public class Server {
         Object[] handle(Request request);
     }
 
-    private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
+    private static final Dotenv dotenv                      = Dotenv.configure().ignoreIfMissing().load();
+    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
     private final int port;
     private final HttpServer server;
+
+    private Runnable onStart;
+    private Runnable onStop;
+    private Runnable onStartAsync;
 
     private final Map<String, String> routePatterns    = new HashMap<>();
     private final Map<String, Method> routeMethods     = new HashMap<>();
@@ -37,17 +47,120 @@ public class Server {
     private final Map<String, Endpoint> routeEndpoints = new HashMap<>();
     private final Map<String, String> routeCors        = new HashMap<>();
 
+    private final Map<Class<?>, Method> errorMethods   = new HashMap<>();
+    private final Map<Class<?>, Object> errorInstances = new HashMap<>();
+
     public Server(int port) throws Exception
     {
         this.port   = port;
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
     }
-    public void listen() throws Exception
+    public Server listen() throws Exception
     {
         this.scan();
+        if (this.onStop != null)
+            Runtime.getRuntime().addShutdownHook(new Thread(this.onStop));
+
+        this.workers();
+        this.listeners();
+        this.errors();
+
         this.server.setExecutor(null);
         this.server.start();
         Logger.info("Server listening on: " + Logger.Color.CYAN + "http://localhost:" + this.port);
+
+        if (this.onStart != null)
+            this.onStart.run();
+        if (this.onStartAsync != null)
+            AsyncUtil.fireForget(this.onStartAsync);
+
+        return this;
+    }
+    private void workers() throws Exception
+    {
+        Reflections reflections = new Reflections(
+            new ConfigurationBuilder()
+                .forPackage("")
+                .filterInputsBy(new FilterBuilder().includePattern(".*"))
+        );
+
+        Set<Class<?>> workers = reflections.getTypesAnnotatedWith(Worker.class);
+        for (Class<?> worker : workers)
+        {
+            Object instance = worker.getDeclaredConstructor().newInstance();
+            for (Method method : worker.getDeclaredMethods())
+            {
+                if (!method.isAnnotationPresent(Cron.class))
+                    continue;
+                Cron cron     = method.getAnnotation(Cron.class);
+                long interval = cron.seconds()
+                    + cron.minutes() * 60L
+                    + cron.hours() * 3600L
+                    + cron.days() * 86400L
+                    + cron.months() * 2592000L;
+                if (interval == 0)
+                    continue;
+                Runnable task = () -> {
+                    try { method.invoke(instance); }
+                    catch (Exception e) { Logger.error(e.getMessage()); }
+                };
+                if (cron.async())
+                    scheduler.scheduleAtFixedRate(
+                        () -> AsyncUtil.fireForget(task),
+                        0, interval, TimeUnit.SECONDS
+                    );
+                else
+                    scheduler.scheduleAtFixedRate(task, 0, interval, TimeUnit.SECONDS);
+            }
+        }
+    }
+    private void listeners() throws Exception
+    {
+        Reflections reflections = new Reflections(
+            new ConfigurationBuilder()
+                .forPackage("")
+                .filterInputsBy(new FilterBuilder().includePattern(".*"))
+        );
+
+        Set<Class<?>> listeners = reflections.getTypesAnnotatedWith(EventListener.class);
+        for (Class<?> listener : listeners)
+        {
+            Object instance = listener.getDeclaredConstructor().newInstance();
+            for (Method method : listener.getDeclaredMethods())
+            {
+                if (!method.isAnnotationPresent(Subscribe.class))
+                    continue;
+                Subscribe subscribe = method.getAnnotation(Subscribe.class);
+
+                Runnable handler = () -> {
+                    try { method.invoke(instance); }
+                    catch (Exception _) {}
+                };
+                EventBus.subscribe(subscribe.value(), handler);
+            }
+        }
+    }
+    private void errors() throws Exception
+    {
+        Reflections reflections = new Reflections(
+            new ConfigurationBuilder()
+                .forPackage("")
+                .filterInputsBy(new FilterBuilder().includePattern(".*"))
+        );
+
+        Set<Class<?>> handlers = reflections.getTypesAnnotatedWith(ErrorListener.class);
+        for (Class<?> handler : handlers)
+        {
+            Object instance = handler.getDeclaredConstructor().newInstance();
+            for (Method method : handler.getDeclaredMethods())
+            {
+                if (!method.isAnnotationPresent(Fetch.class))
+                    continue;
+                Class<? extends Exception> ex = method.getAnnotation(Fetch.class).value();
+                this.errorMethods.put(ex, method);
+                this.errorInstances.put(ex, instance);
+            }
+        }
     }
     private void scan() throws Exception
     {
@@ -90,11 +203,11 @@ public class Server {
                 String fullPath = basePath + endpoint.path();
 
                 String key = endpoint.method().name() + ":" + fullPath;
-                routePatterns.put(key, fullPath);
-                routeMethods.put(key, method);
-                routeInstances.put(key, instance);
-                routeEndpoints.put(key, endpoint);
-                routeCors.put(key, cors);
+                this.routePatterns.put(key, fullPath);
+                this.routeMethods.put(key, method);
+                this.routeInstances.put(key, instance);
+                this.routeEndpoints.put(key, endpoint);
+                this.routeCors.put(key, cors);
             }
         }
         this.server.createContext("/", (ex) -> {
@@ -162,41 +275,49 @@ public class Server {
                     }
 
                 Object result;
-                byte[] response;
-                String contentType;
-
                 if (method.getParameterCount() == 1)
                     result = method.invoke(instance, request);
                 else
                     result = method.invoke(instance);
-
-                if (result instanceof JSON json)
-                {
-                    contentType = "application/json";
-                    response    = json.stringify().getBytes();
-                }
-                else
-                {
-                    contentType = endpoint.textType() == TextType.HTML ?
-                        "text/html" :
-                        "text/plain";
-                    response = result.toString().getBytes();
-                }
                 for (Map.Entry<String, String> headerEntry : request.getNHeaders().entrySet())
                     ex.getResponseHeaders().set(headerEntry.getKey(), headerEntry.getValue());
-                ex.getResponseHeaders().set("Content-Type", contentType);
-                ex.sendResponseHeaders(200, response.length);
-                ex.getResponseBody().write(response);
-                ex.getResponseBody().close();
+                this.sendResponse(ex, result, endpoint.textType(), 200);
 
                 long ms = System.currentTimeMillis() - start;
                 Logger.success(endpoint.method().name() + " " + fullPath + " in " + ms + "ms");
             }
-            catch (Exception _)
+            catch (Exception e)
             {
                 long ms = System.currentTimeMillis() - start;
+
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                if (cause.getCause() != null)
+                    cause = cause.getCause();
+                Method errorMethod = this.errorMethods.get(cause.getClass());
+                if (errorMethod != null)
+                {
+                    try
+                    {
+                        Object result;
+                        if (errorMethod.getParameterCount() == 1)
+                            result = errorMethod.invoke(this.errorInstances.get(cause.getClass()), cause);
+                        else
+                            result = errorMethod.invoke(this.errorInstances.get(cause.getClass()));
+                        
+                        String str    = result.toString();
+                        TextType type = str.trim().startsWith("<") ? TextType.HTML : TextType.Basic;
+                        this.sendResponse(ex, result, type, 500);
+                    }
+                    catch (Exception _)
+                    {
+                        try { ex.sendResponseHeaders(500, -1); }
+                        catch (Exception _) {}
+                    }
+                }
+                else
+                    try { ex.sendResponseHeaders(500, -1); }
+                    catch (Exception _) {};
                 Logger.error(endpoint.method().name() + " " + fullPath + " ERROR in " + ms + "ms");
-                try { ex.sendResponseHeaders(500, -1); } catch (Exception _) {}
             }
         };
 
@@ -204,5 +325,42 @@ public class Server {
             AsyncUtil.fireForget(handler);
         else
             handler.run();
+    }
+    private void sendResponse(HttpExchange ex, Object result, TextType textType, int code) throws Exception
+    {
+        byte[] response;
+        String contentType;
+
+        if (result instanceof JSON json)
+        {
+            contentType = "application/json";
+            response    = json.stringify().getBytes();
+        }
+        else
+        {
+            contentType = textType == TextType.HTML ?
+                "text/html" :
+                "text/plain";
+            response = result.toString().getBytes();
+        }
+        ex.getResponseHeaders().set("Content-Type", contentType);
+        ex.sendResponseHeaders(code, response.length);
+        ex.getResponseBody().write(response);
+        ex.getResponseBody().close();
+    }
+    public Server onStart(Runnable onStart)
+    {
+        this.onStart = onStart;
+        return this;
+    }
+    public Server onStop(Runnable onStop)
+    {
+        this.onStop = onStop;
+        return this;
+    }
+    public Server onStartAsync(Runnable onStartAsync)
+    {
+        this.onStartAsync = onStartAsync;
+        return this;
     }
 }

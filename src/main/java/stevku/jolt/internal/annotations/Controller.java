@@ -1,4 +1,4 @@
-package stevku.jolt.internal;
+package stevku.jolt.internal.annotations;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

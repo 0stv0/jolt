@@ -1,4 +1,4 @@
-package stevku.jolt.internal;
+package stevku.jolt.internal.enums;
 
 public enum TextType {
 
