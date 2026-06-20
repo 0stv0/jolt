@@ -219,14 +219,13 @@ public String onNotFound(Exception e) {
 ## Environment Variables
 
 ```java
-@Controller(path = "/user")
-public class UserController {
+public class Postgres {
 
-    @Env("JWT_SECRET")
-    private String secret;
+    @Env("PG_HOST")
+    private static String host;
 
-    @Env("DB_PORT")
-    private int dbPort;
+    @Env("PG_PORT")
+    private static int port;
 }
 ```
 
