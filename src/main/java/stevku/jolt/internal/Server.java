@@ -207,7 +207,7 @@ public class Server {
     private void env() throws Exception
     {
         String cp      = System.getProperty("java.class.path");
-        String[] parts = cp.split(";");
+        String[] parts = cp.split(File.pathSeparator);
 
         ConfigurationBuilder config = new ConfigurationBuilder()
             .filterInputsBy(new FilterBuilder().includePattern(".*"))
